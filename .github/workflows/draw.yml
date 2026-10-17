@@ -10,9 +10,57 @@ on:
 jobs:
   draw:
     uses: caksoylar/keymap-drawer/.github/workflows/draw-zmk.yml@main
+    with:
+      destination: "artifact"
+      fail_on_error: ${{ fromJSON(true) }}
+
+  # Branch protection on main requires changes to arrive via pull request, so
+  # the reusable workflow only uploads the drawings as an artifact and this
+  # job publishes them on an automation branch, then merges its pull request.
+  publish:
+    needs: draw
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    with:
-      commit_message: "[Draw] ${{ github.event.head_commit.message }}"
-      destination: "commit"
-      fail_on_error: ${{ fromJSON(true) }}
+      pull-requests: write
+    env:
+      BRANCH: automation/keymap-draw
+      COMMIT_MSG: "[Draw] ${{ github.event.head_commit.message || 'Redraw keymaps' }}"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          token: ${{ github.token }}
+
+      - name: Download generated drawings
+        uses: actions/download-artifact@v8
+        with:
+          name: drawings
+          path: keymap-drawer
+
+      - name: Publish via pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain keymap-drawer)" ]; then
+            echo "No drawing changes to publish"
+            exit 0
+          fi
+          TITLE=$(printf '%s\n' "${COMMIT_MSG}" | head -n1)
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+          git add keymap-drawer
+          git commit -m "${COMMIT_MSG}"
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+          pr_number=$(gh pr list --head "${BRANCH}" --json number --jq '.[0].number // empty')
+          if [ -z "${pr_number}" ]; then
+            pr_number=$(gh pr create --head "${BRANCH}" --base main \
+              --title "${TITLE}" \
+              --body "Automated keymap drawing refresh." \
+              --json number --jq '.number')
+          fi
+          gh pr merge "${pr_number}" --squash \
+            --subject "${TITLE}" \
+            --body "" \
+            --delete-branch
